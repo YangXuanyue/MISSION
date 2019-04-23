@@ -47,136 +47,123 @@ const size_t THREADS = 2;
 // Maximum number of features for an example
 const size_t MAX_FEATURES = 5000;
 
-std::array<std::array<hc<N>, MAX_FEATURES>, THREADS> caches;
+std::array <std::array<hc < N>, MAX_FEATURES>, THREADS>
+caches;
 
-void split(data_t& item, fp_t& result)
-{
-		data_t key;
-		data_t value;
-		memset(key.data(), 0, key.size());
-		memset(value.data(), 0, value.size());
+void split(data_t &item, fp_t &result) {
+    data_t key;
+    data_t value;
+    memset(key.data(), 0, key.size());
+    memset(value.data(), 0, value.size());
 
-		int cdx = 0;
-		for(char v = item[cdx]; v != ':'; v = item[cdx])
-		{
-				key[cdx++] = v;
-		}
-		result.first = atoi(key.data());
+    int cdx = 0;
+    for (char v = item[cdx]; v != ':'; v = item[cdx]) {
+        key[cdx++] = v;
+    }
+    result.first = atoi(key.data());
 
-		int initial = ++cdx;
-		for(char v = item[cdx]; v != 0; v = item[cdx])
-		{
-				value[(cdx++ - initial)] = v;
-		}
-		result.second = atof(value.data());
+    int initial = ++cdx;
+    for (char v = item[cdx]; v != 0; v = item[cdx]) {
+        value[(cdx++ - initial)] = v;
+    }
+    result.second = atof(value.data());
 }
 
-void producer(fast_parser& p, mp_queue<x_t>& q)
-{
-		for(std::vector<data_t> x = p.read(' '); p; x = p.read(' '))
-		{
-				const int label = atoi(x[0].data());
+void producer(fast_parser &p, mp_queue <x_t> &q) {
+    for (std::vector <data_t> x = p.read(' '); p; x = p.read(' ')) {
+        const int label = atoi(x[0].data());
 
-				// Parse Features
-				std::vector<fp_t> features(x.size()-1);
-				for(size_t idx = 1; idx < x.size(); ++idx)
-				{
-						split(x[idx], features[idx-1]);
-				}
+        // Parse Features
+        std::vector <fp_t> features(x.size() - 1);
+        for (size_t idx = 1; idx < x.size(); ++idx) {
+            split(x[idx], features[idx - 1]);
+        }
 
-				q.enqueue(std::make_pair(label, features));
-		}
-		//std::cout << "Finished Reading" << std::endl;
+        q.enqueue(std::make_pair(label, features));
+    }
+    //std::cout << "Finished Reading" << std::endl;
 }
 
-float process(CMS<N>& sketch, tk_t& topk, const x_t& x, bool train)
-{
-		float label = (x.first + 1.0f) / 2.0f;
-		const std::vector<fp_t>& features = x.second;
+float process(CMS <N> &sketch, tk_t &topk, const x_t &x, bool train) {
+    float label = (x.first + 1.0f) / 2.0f;
+    const std::vector <fp_t> &features = x.second;
 
-		const int tid = omp_get_thread_num();
-		std::array<hc<N>, MAX_FEATURES>& cache = caches[tid];
-		for(size_t idx = 0; idx < features.size(); ++idx)
-		{
-				const void * key_ptr = (const void *) &features[idx].first;
-				sketch.hash(key_ptr, sizeof(int), cache[idx]);
-		}
+    const int tid = omp_get_thread_num();
+    std::array <hc<N>, MAX_FEATURES> &cache = caches[tid];
+    for (size_t idx = 0; idx < features.size(); ++idx) {
+        const void *key_ptr = (const void *) &features[idx].first;
+        sketch.hash(key_ptr, sizeof(int), cache[idx]);
+    }
 
-		float logit = 0;
-		for(const fp_t& item : features)
-		{
-				logit += topk[item.first] * item.second;
-		}
+    float logit = 0;
+    for (const fp_t &item : features) {
+        logit += topk[item.first] * item.second;
+    }
 
-		float sigmoid = 1.0 / (1.0 + std::exp(-logit));
-		float loss = (label * std::log(sigmoid) + (1.0 - label) * std::log(1 - sigmoid));
-		if(!train)
-		{
-				mtx.lock();
-				std::cout << label << " " << sigmoid << std::endl;
-				mtx.unlock();
-				return loss;
-		}
+    float sigmoid = 1.0 / (1.0 + std::exp(-logit));
+    float loss = (label * std::log(sigmoid) +
+                  (1.0 - label) * std::log(1 - sigmoid));
+    if (!train) {
+        mtx.lock();
+        std::cout << label << " " << sigmoid << std::endl;
+        mtx.unlock();
+        return loss;
+    }
 
-		float gradient = label - sigmoid;
-		for(size_t idx = 0; idx < features.size(); ++idx)
-		{
-				float value = sketch.update(cache[idx], LR * gradient * features[idx].second);
-				topk.push(features[idx].first, value);
-		}
+    float gradient = label - sigmoid;
+    for (size_t idx = 0; idx < features.size(); ++idx) {
+        float value = sketch.update(cache[idx],
+                                    LR * gradient * features[idx].second);
+        topk.push(features[idx].first, value);
+    }
 
-		return loss;
+    return loss;
 }
 
-void consumer(CMS<N>& sketch, tk_t& topk, fast_parser& p, mp_queue<x_t>& q, bool train)
-{
-		std::vector<x_t> items;
-		size_t cnt = 0;
-		while(p || q)
-		{
-				if(!q.full() && p)
-				{
-						std::this_thread::sleep_for (std::chrono::seconds(1));
-						continue;
-				}
+void consumer(CMS <N> &sketch, tk_t &topk, fast_parser &p, mp_queue <x_t> &q,
+              bool train) {
+    std::vector <x_t> items;
+    size_t cnt = 0;
+    while (p || q) {
+        if (!q.full() && p) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
 
-				// Retrieve items from multiprocess queue
-				q.retrieve(items);
-				cnt += items.size();
-				float loss = 0.0;
-				for(size_t cdx = 0; cdx < items.size(); ++cdx)
-				{
-						loss += process(sketch, topk, items[cdx], train);
-				}
+        // Retrieve items from multiprocess queue
+        q.retrieve(items);
+        cnt += items.size();
+        float loss = 0.0;
+        for (size_t cdx = 0; cdx < items.size(); ++cdx) {
+            loss += process(sketch, topk, items[cdx], train);
+        }
 
-				// Debug
-				if(train)
-				{
-						float avg_loss = -loss / items.size();
-						std::cout << cnt << " " << avg_loss << std::endl;
-				}
-				items.clear();
-		}
-		//std::cout << "Finished Consumer" << std::endl;
+        // Debug
+        if (train) {
+            float avg_loss = -loss / items.size();
+            std::cout << cnt << " " << avg_loss << std::endl;
+        }
+        items.clear();
+    }
+    //std::cout << "Finished Consumer" << std::endl;
 }
 
-int main(int argc, char* argv[])
-{
-		CMS<N> sketch(K, D);
-		mp_queue<x_t> q(10000);
-		tk_t topk;
+int main(int argc, char *argv[]) {
+    CMS <N> sketch(K, D);
+    mp_queue <x_t> q(10000);
+    tk_t topk;
 
-		fast_parser train_p(argv[1]);
-		std::thread train_pr([&] { producer(train_p, q); });
-		std::thread train_cr([&] { consumer(sketch, topk, train_p, q, true); });
-		train_pr.join();
-		train_cr.join();
+    fast_parser train_p(argv[1]);
+    std::thread train_pr([&] { producer(train_p, q); });
+    std::thread train_cr([&] { consumer(sketch, topk, train_p, q, true); });
+    train_pr.join();
+    train_cr.join();
 
-		fast_parser test_p(argv[2]);
-		std::thread test_pr([&] { producer(test_p, q); });
-		std::thread test_cr([&] { consumer(sketch, topk, test_p, q, false); });
-		test_pr.join();
-		test_cr.join();
+    fast_parser test_p(argv[2]);
+    std::thread test_pr([&] { producer(test_p, q); });
+    std::thread test_cr([&] { consumer(sketch, topk, test_p, q, false); });
+    test_pr.join();
+    test_cr.join();
 
-		return 0;
+    return 0;
 }
